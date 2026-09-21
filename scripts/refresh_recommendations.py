@@ -15,6 +15,12 @@ QUERY_CATEGORIES = [
     ("culture documentary 2026", "Culture"),
 ]
 
+SEEDS = [
+    {"id":"dQw4w9WgXcQ","title":"Never Gonna Give You Up","channel":"Rick Astley","category":"Music","duration":"3:33","views":"Classic","tags":["music"]},
+    {"id":"kJQP7kiw5Fk","title":"Luis Fonsi - Despacito ft. Daddy Yankee","channel":"Luis Fonsi","category":"Music","duration":"4:42","views":"Classic","tags":["music","latin"]},
+    {"id":"aqz-KE-bpKQ","title":"Gaming Technology Showcase","channel":"YouTube discovery","category":"Gaming","duration":"","views":"Discovery","tags":["gaming","technology"]},
+]
+
 REFRESH_FIX = r"""
 (function(){
   if(window.__recommendationRefreshFix)return;
@@ -22,12 +28,12 @@ REFRESH_FIX = r"""
   const originalRender=render;
   function normalizeCategory(v){
     const text=((v.category||"")+" "+(v.title||"")+" "+(v.channel||"")+" "+((v.tags||[]).join(" "))).toLowerCase();
-    if(text.match(/\b(music|song|album|concert|singer|dj)\b/))return "Music";
-    if(text.match(/\b(python|javascript|programming|coding|developer|software|code|react|java)\b/))return "Coding";
-    if(text.match(/\b(productivity|study|focus|habits|planning|notion|time management)\b/))return "Productivity";
-    if(text.match(/\b(gaming|game|xbox|playstation|nintendo|steam|gpu)\b/))return "Gaming";
-    if(text.match(/\b(culture|history|documentary|society|art|film)\b/))return "Culture";
-    if(text.match(/\b(ai|artificial intelligence|machine learning|science|technology|tech|robot|quantum)\b/))return "Technology";
+    if(/\b(music|song|album|concert|singer|dj)\b/.test(text))return "Music";
+    if(/\b(python|javascript|programming|coding|developer|software|code|react|java)\b/.test(text))return "Coding";
+    if(/\b(productivity|study|focus|habits|planning|notion|time management)\b/.test(text))return "Productivity";
+    if(/\b(gaming|game|xbox|playstation|nintendo|steam|gpu)\b/.test(text))return "Gaming";
+    if(/\b(culture|history|documentary|society|art|film)\b/.test(text))return "Culture";
+    if(/\b(ai|artificial intelligence|machine learning|science|technology|tech|robot|quantum)\b/.test(text))return "Technology";
     return v.category || "Technology";
   }
   function normalizedRender(){
@@ -53,23 +59,18 @@ REFRESH_FIX = r"""
 """
 
 def search(query):
-    cmd = [
-        "yt-dlp", f"ytsearch10:{query}", "--flat-playlist",
-        "--skip-download", "--print", "%(id)s\t%(title)s\t%(uploader)s",
-        "--no-warnings",
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+    result = subprocess.run(
+        ["yt-dlp", f"ytsearch10:{query}", "--flat-playlist", "--skip-download",
+         "--print", "%(id)s\t%(title)s\t%(uploader)s", "--no-warnings"],
+        capture_output=True, text=True, timeout=45
+    )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip()[-500:])
     rows = []
     for line in result.stdout.splitlines():
         parts = line.split("\t", 2)
-        if len(parts) != 3:
-            continue
-        video_id, title, channel = parts
-        if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
-            continue
-        rows.append((video_id, title.strip(), channel.strip()))
+        if len(parts) == 3 and re.fullmatch(r"[A-Za-z0-9_-]{11}", parts[0]):
+            rows.append((parts[0], parts[1].strip(), parts[2].strip()))
     return rows
 
 items = []
@@ -78,11 +79,9 @@ for query, category in QUERY_CATEGORIES:
         try:
             for video_id, title, channel in search(query):
                 items.append({
-                    "id": video_id,
-                    "title": title,
+                    "id": video_id, "title": title,
                     "channel": channel or "YouTube discovery",
-                    "category": category,
-                    "duration": "",
+                    "category": category, "duration": "",
                     "views": "Fresh result",
                     "tags": re.findall(r"[a-z0-9+#.-]+", query.lower()),
                 })
@@ -91,16 +90,20 @@ for query, category in QUERY_CATEGORIES:
             print(f"Search failed ({query}, attempt {attempt + 1}): {exc}")
             time.sleep(2)
 
-unique = []
-seen = set()
+unique, seen = [], set()
 for item in items:
     if item["id"] not in seen:
         seen.add(item["id"])
         unique.append(item)
-items = unique[:60]
 
+for seed in SEEDS:
+    if seed["id"] not in seen:
+        seen.add(seed["id"])
+        unique.append(seed)
+
+items = unique[:60]
 if len(items) < 10:
-    raise SystemExit(f"Only {len(items)} usable YouTube results found; refusing to overwrite the app with a tiny feed.")
+    raise SystemExit(f"Only {len(items)} usable recommendations found; refusing to overwrite the app with a tiny feed.")
 
 path = Path("app.js")
 source = path.read_text(encoding="utf-8")
@@ -109,16 +112,19 @@ replacement = f"const fallbackVideos={payload};let videos="
 updated, count = re.subn(r"const fallbackVideos=.*?;let videos=", replacement, source, count=1, flags=re.S)
 if count != 1:
     raise SystemExit("Could not locate fallbackVideos in app.js")
+
+# Keep the filter UI in sync with the categories generated above.
+updated = updated.replace(
+    "['All','Technology','Coding','Music','Productivity','Culture','Relax']",
+    "['All','Technology','Coding','Music','Productivity','Culture','Gaming','Relax']"
+)
 if "window.__recommendationRefreshFix" not in updated:
     updated += "\n" + REFRESH_FIX + "\n"
-path.write_text(updated, encoding="utf-8")
 
-Path("recommendation-refresh-status.json").write_text(
-    json.dumps({
-        "items": len(items),
-        "categories": {c: sum(1 for x in items if x["category"] == c) for _, c in QUERY_CATEGORIES},
-        "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    }, indent=2),
-    encoding="utf-8",
-)
-print(f"Updated {len(items)} recommendations with category metadata")
+path.write_text(updated, encoding="utf-8")
+Path("recommendation-refresh-status.json").write_text(json.dumps({
+    "items": len(items),
+    "categories": {c: sum(1 for x in items if x["category"] == c) for _, c in QUERY_CATEGORIES},
+    "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+}, indent=2), encoding="utf-8")
+print(f"Updated {len(items)} recommendations")

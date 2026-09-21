@@ -1,74 +1,121 @@
 from __future__ import annotations
 
+import html
 import json
 import re
-import urllib.request
 import urllib.parse
-import xml.etree.ElementTree as ET
+import urllib.request
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler
 
-CHANNELS = [
-    ("UCYO_jab_esuFRV4b17AJtAw", "3Blue1Brown", "Technology", ["ai", "math", "learning"]),
-    ("UC8butISFwT-Wl7EV0hUK0BQ", "freeCodeCamp.org", "Coding", ["coding", "python", "javascript", "learning"]),
-    ("UCWv7vMbMWH4-V0ZXdmDpPBA", "Programming with Mosh", "Coding", ["coding", "python", "javascript", "learning"]),
-    ("UCoOae5nYA7VqaXzerajD0lg", "Ali Abdaal", "Productivity", ["productivity", "learning"]),
-    ("UCBJycsmduvYEL83R_U4JriQ", "Marques Brownlee", "Technology", ["technology", "gadgets", "ai"]),
+FALLBACK_QUERIES = [
+    "artificial intelligence technology",
+    "programming software engineering",
+    "science mathematics learning",
+    "productivity study skills",
+    "gaming technology",
+    "music new releases",
 ]
 
-ATOM = "{http://www.w3.org/2005/Atom}"
-YT = "{http://www.youtube.com/xml/schemas/2015}"
+class SearchParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_result = False
+        self.in_title = False
+        self.href = ""
+        self.title_parts = []
+        self.results = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = attrs.get("class", "")
+        if tag == "a" and "result__a" in classes:
+            self.in_result = True
+            self.in_title = True
+            self.href = attrs.get("href", "")
+            self.title_parts = []
+
+    def handle_data(self, data):
+        if self.in_result and self.in_title:
+            self.title_parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.in_result:
+            title = html.unescape(" ".join("".join(self.title_parts).split()))
+            if title and self.href:
+                self.results.append((title, self.href))
+            self.in_result = False
+            self.in_title = False
 
 
-def fetch_feed(channel_id: str, channel: str, category: str, tags: list[str]) -> list[dict]:
-    url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    request = urllib.request.Request(url, headers={"User-Agent": "watchlist-plus/1.0"})
-    with urllib.request.urlopen(request, timeout=5) as response:
-        root = ET.fromstring(response.read())
+def clean_youtube_url(url: str) -> str | None:
+    if url.startswith("//"):
+        url = "https:" + url
+    parsed = urllib.parse.urlparse(url)
+    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+        target = urllib.parse.parse_qs(parsed.query).get("uddg", [""])[0]
+        url = urllib.parse.unquote(target)
+        parsed = urllib.parse.urlparse(url)
+    if parsed.netloc not in {"www.youtube.com", "youtube.com", "m.youtube.com", "youtu.be"}:
+        return None
+    if parsed.path.startswith("/watch"):
+        video_id = urllib.parse.parse_qs(parsed.query).get("v", [""])[0]
+    elif parsed.netloc == "youtu.be":
+        video_id = parsed.path.strip("/").split("/")[0]
+    else:
+        video_id = parsed.path.split("/")[-1]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
+        return None
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def search_youtube(query: str) -> list[dict]:
+    search_url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({
+        "q": f"site:youtube.com/watch {query} 2026"
+    })
+    request = urllib.request.Request(
+        search_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; watchlist-plus/1.0)",
+            "Accept": "text/html",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        source = response.read().decode("utf-8", "ignore")
+    parser = SearchParser()
+    parser.feed(source)
 
     items = []
-    for entry in root.findall(f"{ATOM}entry"):
-        video_id = entry.findtext(f"{YT}videoId", default="")
-        title = entry.findtext(f"{ATOM}title", default="")
-        published = entry.findtext(f"{ATOM}published", default="")
-        if not video_id or not title:
+    for title, href in parser.results:
+        url = clean_youtube_url(href)
+        if not url:
             continue
+        video_id = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("v", [""])[0]
         items.append({
             "id": video_id,
-            "title": title.strip(),
-            "channel": channel,
-            "category": category,
+            "title": title.replace(" - YouTube", "").strip(),
+            "channel": "YouTube discovery",
+            "category": "Discovery",
             "duration": "",
-            "views": "New upload",
-            "tags": tags,
-            "published": published,
+            "views": "Fresh result",
+            "tags": re.findall(r"[a-z0-9+#.-]+", query.lower()),
+            "published": "",
+            "url": url,
         })
     return items
 
 
 def build_items(query: str) -> tuple[list[dict], list[str]]:
-    all_items: list[dict] = []
-    failed: list[str] = []
-    for channel_id, channel, category, tags in CHANNELS:
+    queries = [query.strip()] if query.strip() else FALLBACK_QUERIES
+    all_items = []
+    failed = []
+    for q in queries:
         try:
-            all_items.extend(fetch_feed(channel_id, channel, category, tags))
+            all_items.extend(search_youtube(q))
         except Exception:
-            failed.append(channel)
+            failed.append(q)
 
-    terms = re.findall(r"[a-z0-9+#.-]+", query.lower())
-    if terms:
-        all_items = [
-            item for item in all_items
-            if any(
-                term in (
-                    item["title"] + " " + item["channel"] + " " +
-                    item["category"] + " " + " ".join(item["tags"])
-                ).lower()
-                for term in terms
-            )
-        ]
-
-    all_items.sort(key=lambda item: item.get("published", ""), reverse=True)
     unique = []
     seen = set()
     for item in all_items:
@@ -76,6 +123,7 @@ def build_items(query: str) -> tuple[list[dict], list[str]]:
             continue
         seen.add(item["id"])
         unique.append(item)
+
     return unique[:40], failed
 
 
@@ -86,14 +134,13 @@ class handler(BaseHTTPRequestHandler):
                 urllib.parse.urlparse(self.path).query
             ).get("q", [""])[0][:120]
             items, failed = build_items(query)
-            payload = {
+            body = json.dumps({
                 "items": items,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
-                "sources_ok": len(CHANNELS) - len(failed),
+                "sources_ok": len(( [query] if query else FALLBACK_QUERIES )) - len(failed),
                 "sources_failed": failed,
-                "mode": "public-youtube-rss",
-            }
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                "mode": "keyless-web-discovery",
+            }, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
         except Exception as exc:
             body = json.dumps({"items": [], "error": str(exc)}).encode("utf-8")

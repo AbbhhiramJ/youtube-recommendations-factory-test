@@ -15,6 +15,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install yt-dlp
+        run: python -m pip install --disable-pip-version-check -q yt-dlp
+
       - name: Refresh YouTube recommendations
         run: python scripts/refresh_recommendations.py
 

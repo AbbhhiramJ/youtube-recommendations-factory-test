@@ -1,0 +1,31 @@
+name: Refresh Recommendations
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Refresh YouTube recommendations
+        run: python scripts/refresh_recommendations.py
+
+      - name: Commit changed recommendations
+        run: |
+          git config user.name "recommendation-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add app.js recommendation-refresh-status.json
+          if git diff --cached --quiet; then
+            echo "No recommendation changes."
+          else
+            git commit -m "chore: refresh video recommendations"
+            git push
+          fi

@@ -1,1 +1,1 @@
-{"buildCommand":"echo static-site","outputDirectory":".","functions":{"api/recommendations.py":{"runtime":"python3.12"}}}
+{"buildCommand":"echo static-site","outputDirectory":"."}

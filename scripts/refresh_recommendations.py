@@ -1,57 +1,98 @@
 import json
 import re
 import time
+import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
 from pathlib import Path
 
-CHANNELS = [
-    ("UCYO_jab_esuFRV4b17AJtAw", "3Blue1Brown", "Technology", ["ai", "math", "learning"]),
-    ("UC8butISFwT-Wl7EV0hUK0BQ", "freeCodeCamp.org", "Coding", ["coding", "python", "javascript", "learning"]),
-    ("UCWv7vMbMWH4-V0ZXdmDpPBA", "Programming with Mosh", "Coding", ["coding", "python", "javascript", "learning"]),
-    ("UCoOae5nYA7VqaXzerajD0lg", "Ali Abdaal", "Productivity", ["productivity", "learning"]),
-    ("UCBJycsmduvYEL83R_U4JriQ", "Marques Brownlee", "Technology", ["technology", "gadgets", "ai"]),
+QUERIES = [
+    "artificial intelligence technology",
+    "programming python javascript",
+    "machine learning tutorial",
+    "science mathematics",
+    "productivity study skills",
+    "gaming technology",
+    "new music",
 ]
 
-ATOM = "{http://www.w3.org/2005/Atom}"
-YT = "{http://www.youtube.com/xml/schemas/2015}"
+class Parser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.results = []
+        self.active = False
+        self.href = ""
+        self.parts = []
 
-def fetch(channel_id, channel, category, tags):
-    url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    last = None
-    for attempt in range(4):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 watchlist-refresh/1.0"})
-            with urllib.request.urlopen(req, timeout=20) as response:
-                root = ET.fromstring(response.read())
-            rows = []
-            for entry in root.findall(f"{ATOM}entry"):
-                video_id = entry.findtext(f"{YT}videoId", "")
-                title = entry.findtext(f"{ATOM}title", "")
-                published = entry.findtext(f"{ATOM}published", "")
-                if video_id and title:
-                    rows.append({
-                        "id": video_id,
-                        "title": title.strip(),
-                        "channel": channel,
-                        "category": category,
-                        "duration": "",
-                        "views": "Fresh upload",
-                        "tags": tags,
-                        "published": published,
-                    })
-            return rows
-        except Exception as exc:
-            last = exc
-            time.sleep(2 ** attempt)
-    print(f"Feed failed for {channel}: {last}")
-    return []
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "a" and "result__a" in attrs.get("class", ""):
+            self.active = True
+            self.href = attrs.get("href", "")
+            self.parts = []
+
+    def handle_data(self, data):
+        if self.active:
+            self.parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.active:
+            title = " ".join("".join(self.parts).split())
+            if title and self.href:
+                self.results.append((title, self.href))
+            self.active = False
+
+def youtube_url(href):
+    if href.startswith("//"):
+        href = "https:" + href
+    parsed = urllib.parse.urlparse(href)
+    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+        href = urllib.parse.parse_qs(parsed.query).get("uddg", [""])[0]
+        parsed = urllib.parse.urlparse(urllib.parse.unquote(href))
+    if parsed.netloc not in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}:
+        return None, None
+    if parsed.netloc == "youtu.be":
+        video_id = parsed.path.strip("/").split("/")[0]
+    else:
+        video_id = urllib.parse.parse_qs(parsed.query).get("v", [""])[0]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
+        return None, None
+    return f"https://www.youtube.com/watch?v={video_id}", video_id
+
+def search(query):
+    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({
+        "q": f"site:youtube.com/watch {query} 2026"
+    })
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=20) as response:
+        html = response.read().decode("utf-8", "ignore")
+    parser = Parser()
+    parser.feed(html)
+    out = []
+    for title, href in parser.results:
+        url, video_id = youtube_url(href)
+        if url:
+            out.append({
+                "id": video_id,
+                "title": title.replace(" - YouTube", "").strip(),
+                "channel": "YouTube discovery",
+                "category": "Discovery",
+                "duration": "",
+                "views": "Fresh result",
+                "tags": re.findall(r"[a-z0-9+#.-]+", query.lower()),
+            })
+    return out
 
 items = []
-for args in CHANNELS:
-    items.extend(fetch(*args))
+for query in QUERIES:
+    for attempt in range(3):
+        try:
+            items.extend(search(query))
+            break
+        except Exception as exc:
+            print(f"Search failed ({query}, attempt {attempt + 1}): {exc}")
+            time.sleep(2 ** attempt)
 
-items.sort(key=lambda x: x.get("published", ""), reverse=True)
 unique = []
 seen = set()
 for item in items:
@@ -72,4 +113,6 @@ Path("recommendation-refresh-status.json").write_text(
     json.dumps({"items": len(items), "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2),
     encoding="utf-8",
 )
+if len(items) < 10:
+    raise SystemExit(f"Only {len(items)} usable YouTube results found; refusing to overwrite the app with a tiny feed.")
 print(f"Updated {len(items)} recommendations")

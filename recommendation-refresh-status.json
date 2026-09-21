@@ -1,4 +1,12 @@
 {
   "items": 60,
-  "updated": "2026-09-21T04:54:59Z"
+  "categories": {
+    "Technology": 30,
+    "Coding": 10,
+    "Productivity": 10,
+    "Gaming": 10,
+    "Music": 0,
+    "Culture": 0
+  },
+  "updated": "2026-09-21T05:02:01Z"
 }
